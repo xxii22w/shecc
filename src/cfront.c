@@ -90,7 +90,8 @@ typedef enum {
     T_switch,
     T_case,
     T_break,
-    T_default
+    T_default,
+    T_continue
 } token_t;
 
 char token_str[MAX_TOKEN_LEN];
@@ -456,6 +457,8 @@ token_t get_next_token()
             return T_break;
         if (strcmp(token_str, "default") == 0)
             return T_default;
+        if (strcmp(token_str,"continue") == 0)
+            return T_continue;
 
         alias = find_alias(token_str);
         if (alias) {
@@ -521,6 +524,7 @@ int get_size(var_t *var, type_t *type)
 }
 
 int break_level;
+int continue_level;
 
 int read_numeric_constant(char buffer[])
 {
@@ -1223,7 +1227,7 @@ void read_lvalue(lvalue_t *lvalue,
     }
 }
 
-int read_body_assignment(char *token, block_t *parent)
+int read_body_assignment(char *token, block_t *parent,opcode_t prefix_op)
 {
     var_t *var = find_local_var(token, parent);
     if (var == NULL)
@@ -1253,8 +1257,11 @@ int read_body_assignment(char *token, block_t *parent)
             op = OP_bit_or;
         } else if (lex_accept(T_andeq)) {
             op = OP_bit_and;
-        } else {
+        } else if(prefix_op == OP_generic){
             lex_expect(T_assign);
+        } else {
+            op = prefix_op;
+            one = 1;
         }
 
         if (op != OP_generic) {
@@ -1450,6 +1457,7 @@ int read_global_assignment(char* token)
 }
 
 int break_exit_ir_index[MAX_NESTING];
+int conti_jump_ir_index[MAX_NESTING];
 
 void read_code_block(func_t *func, block_t *parent);
 
@@ -1460,6 +1468,7 @@ void read_body_statement(block_t *parent)
     type_t *type;
     var_t *var;
     ir_instr_t *ii;
+    opcode_t prefix_op = OP_generic;
 
     /* statement can be:
      *   function call, variable declaration, assignment operation,
@@ -1520,7 +1529,10 @@ void read_body_statement(block_t *parent)
 
     if (lex_accept(T_while)) {
         ir_instr_t *false_jump;
-        ir_instr_t *start = add_instr(OP_label); /* start to return to */
+        ir_instr_t *start_jump = add_instr(OP_jump); /*jump to while condition*/
+        ir_instr_t *exit_label = add_instr(OP_label);
+        ir_instr_t *exit_jump = add_instr(OP_jump);
+        ir_instr_t *start_label = add_instr(OP_label);  /*start to return to*/
 
         lex_expect(T_open_bracket);
         read_expr(0, parent); /* get expression value into return value */
@@ -1529,11 +1541,20 @@ void read_body_statement(block_t *parent)
         false_jump = add_instr(OP_jz);
         false_jump->param_no = 0;
 
+        start_jump->int_param1 = start_label->ir_index;
+
+        /*create exit jump for breaks*/
+        break_exit_ir_index[break_level++] = exit_label->ir_index;
+
+        conti_jump_ir_index[continue_level++] = start_label->ir_index;
         read_body_statement(parent);
+
+        break_level--;
+        continue_level--;
 
         /* unconditional jump back to expression */
         ii = add_instr(OP_jump);
-        ii->int_param1 = start->ir_index;
+        ii->int_param1 = start_label->ir_index;
 
         /* exit label */
         ii = add_instr(OP_label);
@@ -1626,7 +1647,17 @@ void read_body_statement(block_t *parent)
         ii->int_param1 = break_exit_ir_index[break_level - 1];
     }
 
+    if(lex_accept(T_continue))
+    {
+        li = add_instr(OP_jump);
+        li->int_param1 = conti_jump_ir_index[continue_level - 1];
+    }
+
     if (lex_accept(T_for)) {
+        ir_instr_t *start_jump = add_instr(OP_jump);
+        ir_instr_t *exit_label = add_instr(OP_label);
+        ir_instr_t *exit_jump = add_instr(OP_jump);
+        ir_instr_t *start_label = add_instr(OP_label);
         ir_instr_t *condition_start;
         ir_instr_t *condition_jump_out;
         ir_instr_t *condition_jump_in;
@@ -1636,12 +1667,13 @@ void read_body_statement(block_t *parent)
         ir_instr_t *body_jump;
         ir_instr_t *end;
 
+        start_jump->int_param1 = start_label->ir_index;
         lex_expect(T_open_bracket);
 
         /* setup - execute once */
         if (!lex_accept(T_semicolon)) {
             lex_peek(T_identifier, token);
-            read_body_assignment(token, parent);
+            read_body_assignment(token, parent,OP_generic);
             lex_expect(T_semicolon);
         }
 
@@ -1665,8 +1697,12 @@ void read_body_statement(block_t *parent)
         /* increment after each loop */
         increment = add_instr(OP_label);
         if (!lex_accept(T_close_bracket)) {
+            if(lex_accept(T_increment))
+                prefix_op = OP_add;
+            else if(lex_accept(T_decrement))
+                prefix_op = OP_sub;
             lex_peek(T_identifier, token);
-            read_body_assignment(token, parent);
+            read_body_assignment(token, parent,prefix_op);
             lex_expect(T_close_bracket);
         }
 
@@ -1677,7 +1713,11 @@ void read_body_statement(block_t *parent)
         /* loop body */
         body_start = add_instr(OP_label);
         condition_jump_in->int_param1 = body_start->ir_index;
+        break_exit_ir_index[break_level++] = exit_label->ir_index;
+        conti_jump_ir_index[continue_level++] = increment->ir_index;
         read_body_statement(parent);
+        break_level--;
+        continue_level--;
 
         /* jump to increment */
         body_jump = add_instr(OP_jump);
@@ -1685,14 +1725,28 @@ void read_body_statement(block_t *parent)
 
         end = add_instr(OP_label);
         condition_jump_out->int_param1 = end->ir_index;
+        exit_jump->int_param1 = end->ir_index;
         return;
     }
 
     if (lex_accept(T_do)) {
         ir_instr_t *false_jump;
-        ir_instr_t *start = add_instr(OP_label); /* start to return to */
+        ir_instr_t *start_jump = add_instr(OP_jump);
+        ir_instr_t *cond_label;
+        ir_instr_t *cond_jump = add_instr(OP_jump);
+        ir_instr_t *exit_label;
+        ir_instr_t *exit_jump = add_instr(OP_jump);
+        ir_instr_t *start_label = add_instr(OP_label); /* start to return to */
+        start_jump->int_param1 = start_label->ir_index;
 
+        break_exit_ir_index[break_level++] = exit_jump->ir_index;
+        conti_jump_ir_index[continue_level++] = cond_jump->ir_index;
         read_body_statement(parent);
+        break_level--;
+        continue_level--;
+
+        cond_label = add_instr(OP_label);
+        cond_jump->int_param1 = cond_label->ir_index;
         lex_expect(T_while);
         lex_expect(T_open_bracket);
         read_expr(0, parent); /* get expression value into return value */
@@ -1700,7 +1754,9 @@ void read_body_statement(block_t *parent)
 
         false_jump = add_instr(OP_jnz);
         false_jump->param_no = 0;
-        false_jump->int_param1 = start->ir_index;
+        false_jump->int_param1 = start_label->ir_index;
+        exit_label = add_instr(OP_label);
+        exit_jump->int_param1 = exit_label->ir_index;
 
         lex_expect(T_semicolon);
         return;
@@ -1710,6 +1766,11 @@ void read_body_statement(block_t *parent)
     if (lex_accept(T_semicolon))
         return;
 
+    /*statement with prefix*/
+    if(lex_accept(T_increment))
+        prefix_op = OP_add;
+    else if(lex_accept(T_decrement))
+        prefix_op = OP_sub;
     /* must be an identifier */
     if (!lex_peek(T_identifier, token))
         error("Unexpected token");
@@ -1768,7 +1829,7 @@ void read_body_statement(block_t *parent)
     }
 
     /* is an assignment? */
-    if (read_body_assignment(token, parent)) {
+    if (read_body_assignment(token, parent,prefix_op)) {
         lex_expect(T_semicolon);
         return;
     }
@@ -1987,6 +2048,7 @@ void parse_internal()
 
     /* internal */
     break_level = 0;
+    continue_level = 0;
 
     /* lexer initialization */
     source_idx = 0;
