@@ -247,6 +247,16 @@ int main() {
 }
 EOF
 
+# global initialization
+try_ 20 << EOF
+int a = 5 * 2;
+int b = -4 * 3 + 7 + 9 / 3 * 5;
+int main()
+{
+    exit(a + b);
+}
+EOF
+
 # conditional operator
 # expr 10 "1 ? 10 : 5"
 # expr 25 "0 ? 10 : 25"
@@ -263,5 +273,11 @@ expr 1 "sizeof(char)";
 # switch-case
 items 10 "int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; case 1: return 0; } exit(a);"
 items 10 "int a; a = 0; switch (3) { case 0: return 2; default: a = 10; break; } exit(a);"
+
+# enum
+try_ 6 << EOF
+typedef enum { enum1 = 5, enum2 } enum_t;
+int main() { enum_t v = enum2; exit(v); }
+EOF
 
 echo OK

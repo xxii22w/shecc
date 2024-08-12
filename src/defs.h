@@ -107,6 +107,7 @@ typedef struct {
     int is_ptr;
     int array_size;
     int offset; /* offset from stack or frame */
+    int init_val;   /*for global initialization*/
 } var_t;
 
 /* function definition */
